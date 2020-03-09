@@ -645,6 +645,7 @@ public class RedissonLock extends RedissonExpirable implements RLock {
         ttlFuture.addListener(new FutureListener<Long>() {
             @Override
             public void operationComplete(Future<Long> future) throws Exception {
+                // 如果发生异常，则通过 result 通知异常
                 if (!future.isSuccess()) {
                     result.tryFailure(future.cause());
                     return;
@@ -653,6 +654,7 @@ public class RedissonLock extends RedissonExpirable implements RLock {
                 Long ttl = future.getNow();
 
                 // lock acquired
+                // 如果获得到锁，则通过 result 通知获得锁成功
                 if (ttl == null) {
                     if (!result.trySuccess(true)) {
                         unlockAsync(currentThreadId);
@@ -660,45 +662,59 @@ public class RedissonLock extends RedissonExpirable implements RLock {
                     return;
                 }
 
+                // 减掉已经等待的时间
                 long elapsed = System.currentTimeMillis() - currentTime;
                 time.addAndGet(-elapsed);
-                
+
+                // 如果无剩余等待的时间，则通过 result 通知获得锁失败
                 if (time.get() <= 0) {
                     trySuccessFalse(currentThreadId, result);
                     return;
                 }
-                
+
+                // 记录新的当前时间
                 final long current = System.currentTimeMillis();
                 final AtomicReference<Timeout> futureRef = new AtomicReference<Timeout>();
+                // 创建 SUBSCRIBE 订阅的 Future
                 final RFuture<RedissonLockEntry> subscribeFuture = subscribe(currentThreadId);
                 subscribeFuture.addListener(new FutureListener<RedissonLockEntry>() {
                     @Override
                     public void operationComplete(Future<RedissonLockEntry> future) throws Exception {
+                        // 如果发生异常，则通过 result 通知异常
                         if (!future.isSuccess()) {
                             result.tryFailure(future.cause());
                             return;
                         }
 
+                        // 如果创建定时任务 Future scheduledFuture，则进行取消
                         if (futureRef.get() != null) {
                             futureRef.get().cancel();
                         }
 
+                        // 减掉已经等待的时间
                         long elapsed = System.currentTimeMillis() - current;
                         time.addAndGet(-elapsed);
-                        
+
+                        // 再次执行异步获得锁
                         tryLockAsync(time, leaseTime, unit, subscribeFuture, result, currentThreadId);
                     }
                 });
+
+                // 如果创建 SUBSCRIBE 订阅的 Future 未完成，创建定时任务 Future scheduledFuture 。
                 if (!subscribeFuture.isDone()) {
                     Timeout scheduledFuture = commandExecutor.getConnectionManager().newTimeout(new TimerTask() {
                         @Override
                         public void run(Timeout timeout) throws Exception {
+                            // 如果创建 SUBSCRIBE 订阅的 Future 未完成
                             if (!subscribeFuture.isDone()) {
+                                // 进行取消 subscribeFuture
                                 subscribeFuture.cancel(false);
+                                // 通过 result 通知获得锁失败
                                 trySuccessFalse(currentThreadId, result);
                             }
                         }
                     }, time.get(), TimeUnit.MILLISECONDS);
+                    // 记录 futureRef 执行 scheduledFuture
                     futureRef.set(scheduledFuture);
                 }
             }
